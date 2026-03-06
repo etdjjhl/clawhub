@@ -1,0 +1,8 @@
+# Instance data (configs, tokens, workspaces)
+instances/*/config/
+instances/*/workspace/
+instances/*/.env
+instances/probe/
+
+# Keep directory structure hints
+!instances/.gitkeep
