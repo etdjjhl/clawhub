@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTANCES_DIR="${SCRIPT_DIR}/instances"
+CLAWHUB_HOME="${CLAWHUB_HOME:-$HOME/.local/share/clawhub}"
+INSTANCES_DIR="$CLAWHUB_HOME/instances"
 BASE_PORT=18789
 DEFAULT_VERSION="latest"
 
@@ -72,6 +72,7 @@ services:
     profiles: ["cli"]
     volumes:
       - ./config:/home/node/.openclaw
+      - ${WORKSPACE_PATH}:/home/node/.openclaw/workspace
     user: "1000:1000"
 YAML
 }
@@ -370,6 +371,16 @@ cmd_version() {
     fi
 }
 
+cmd_env() {
+    local count=0
+    if [[ -d "$INSTANCES_DIR" ]]; then
+        count=$(find "$INSTANCES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+    fi
+    printf "%-15s %s\n" "CLAWHUB_HOME"  "$CLAWHUB_HOME"
+    printf "%-15s %s\n" "INSTANCES_DIR" "$INSTANCES_DIR"
+    printf "%-15s %s\n" "Instances"     "$count"
+}
+
 # ── usage ─────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -391,6 +402,7 @@ Commands:
   update <name> [--version <tag>]
                           Pull new image and restart (default: latest)
   version <name>          Print running container's image version
+  env                     Show global configuration (CLAWHUB_HOME, instance count)
 EOF
 }
 
@@ -411,6 +423,7 @@ case "$COMMAND" in
     login)   cmd_login   "$@" ;;
     update)  cmd_update  "$@" ;;
     version) cmd_version "$@" ;;
+    env)     cmd_env     ;;
     help|-h|--help) usage ;;
     *) die "Unknown command: '${COMMAND}'. Run '$(basename "$0") help' for usage." ;;
 esac
