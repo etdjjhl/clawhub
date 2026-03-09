@@ -87,6 +87,22 @@ OPENCLAW_VERSION=${version}
 EOF
 }
 
+# After pulling an image, read its OCI label and pin the actual version in .env
+pin_actual_version() {
+    local name="$1"
+    local idir
+    idir="$(instance_dir "$name")"
+    local NAME PORT WORKSPACE_PATH OPENCLAW_VERSION
+    load_env "$name"
+    local actual_ver
+    actual_ver=$(docker inspect "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}" \
+        --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
+    if [[ -n "$actual_ver" && "$actual_ver" != "$OPENCLAW_VERSION" ]]; then
+        sed -i "s/^OPENCLAW_VERSION=.*/OPENCLAW_VERSION=${actual_ver}/" "${idir}/.env"
+        echo "Pinned to version ${actual_ver}."
+    fi
+}
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 patch_brand() {
@@ -148,8 +164,12 @@ cmd_create() {
     write_compose "$idir"
     write_env "$idir" "$name" "$port" "$workspace" "$version"
 
+    echo "Pulling image ..."
+    compose "$name" pull openclaw-gateway
+    pin_actual_version "$name"
+
     echo "Running onboard wizard ..."
-    compose "$name" run --rm openclaw-cli openclaw.mjs onboard
+    compose "$name" run --rm openclaw-cli openclaw.mjs onboard || true
 
     echo "Configuring LAN access ..."
     compose "$name" run --rm --no-TTY openclaw-cli node openclaw.mjs config set \
@@ -212,26 +232,13 @@ cmd_stop() {
     echo "Instance '${name}' stopped."
 }
 
-cmd_status() {
+cmd_list() {
     local name="${1:-}"
     if [[ -n "$name" ]]; then
         require_instance "$name"
         compose "$name" ps
-    else
-        if [[ ! -d "$INSTANCES_DIR" ]] || [[ -z "$(ls -A "$INSTANCES_DIR" 2>/dev/null)" ]]; then
-            echo "No instances found."
-            return
-        fi
-        for idir in "${INSTANCES_DIR}"/*/; do
-            local n
-            n="$(basename "$idir")"
-            echo "=== ${n} ==="
-            compose "$n" ps 2>/dev/null || echo "(error reading status)"
-        done
+        return
     fi
-}
-
-cmd_list() {
     if [[ ! -d "$INSTANCES_DIR" ]] || [[ -z "$(ls -A "$INSTANCES_DIR" 2>/dev/null)" ]]; then
         echo "No instances found."
         return
@@ -268,17 +275,26 @@ cmd_info() {
     load_env "$name"
 
     local actual_ver="$OPENCLAW_VERSION"
+    local oci_ver=""
     local container="openclaw-${name}"
     if docker inspect "$container" &>/dev/null; then
-        local oci_ver
         oci_ver=$(docker inspect "$container" \
             --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
-        [[ -n "$oci_ver" ]] && actual_ver="${OPENCLAW_VERSION} (${oci_ver})"
+        [[ -n "$oci_ver" && "$oci_ver" != "$OPENCLAW_VERSION" ]] && actual_ver="${OPENCLAW_VERSION} (${oci_ver})"
     fi
+
+    local latest_ver
+    latest_ver=$(curl -sf "https://api.github.com/repos/openclaw/openclaw/releases/latest" 2>/dev/null \
+        | python3 -c "import json,sys; r=json.load(sys.stdin); print(r['tag_name'].lstrip('v'))" 2>/dev/null || true)
+
+    local running_ver="${oci_ver:-$OPENCLAW_VERSION}"
 
     echo "Instance:   ${NAME}"
     echo "Port:       ${PORT}"
     echo "Version:    ${actual_ver}"
+    if [[ -n "$latest_ver" && -n "$running_ver" && "$latest_ver" != "$running_ver" ]]; then
+        echo "Latest:     ${latest_ver}  ← update available (run: clawhub update ${name})"
+    fi
     echo "Workspace:  ${WORKSPACE_PATH}"
 
     local container="openclaw-${name}"
@@ -342,6 +358,7 @@ cmd_update() {
 
     echo "Pulling new image ..."
     compose "$name" pull openclaw-gateway
+    pin_actual_version "$name"
 
     echo "Restarting gateway ..."
     compose "$name" up -d openclaw-gateway
@@ -350,24 +367,87 @@ cmd_update() {
     echo "Instance '${name}' updated."
 }
 
-cmd_version() {
-    local name="${1:-}"
-    [[ -n "$name" ]] || die "Usage: version <name>"
-    require_instance "$name"
+cmd_versions() {
+    local days="${1:-7}"
+    echo "Fetching OpenClaw releases from the last ${days} day(s) ..."
+    echo ""
 
-    local container="openclaw-${name}"
-    docker inspect "$container" &>/dev/null || die "Container '${container}' is not running."
+    local cutoff
+    cutoff=$(date -u -d "${days} days ago" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -v-"${days}"d '+%Y-%m-%dT%H:%M:%SZ')  # macOS fallback
 
-    local ver
-    ver=$(docker inspect "$container" \
-        --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
+    local result
+    result=$(curl -sf "https://api.github.com/repos/openclaw/openclaw/releases?per_page=50" 2>/dev/null) \
+        || { echo "ERROR: Failed to fetch releases (check network/proxy)."; return 1; }
 
-    if [[ -z "$ver" ]]; then
-        # Fallback: read from .env
-        ver=$(grep -Po '(?<=^OPENCLAW_VERSION=)\S+' "$(instance_dir "$name")/.env" 2>/dev/null || echo "unknown")
-        echo "${ver} (from .env — image label not found)"
-    else
-        echo "$ver"
+    local found=false
+    printf "%-22s %-12s %s\n" "VERSION (--version)" "TYPE" "PUBLISHED"
+    printf "%-22s %-12s %s\n" "-------------------" "----" "---------"
+
+    while IFS=$'\t' read -r tag published prerelease; do
+        [[ "$published" < "$cutoff" ]] && continue
+        found=true
+        local ver="${tag#v}"   # strip leading 'v'
+        local type="stable"
+        [[ "$prerelease" == "true" ]] && type="pre-release"
+        printf "%-22s %-12s %s\n" "$ver" "$type" "${published%T*}"
+    done < <(echo "$result" | python3 -c "
+import json,sys
+for r in json.load(sys.stdin):
+    print(r['tag_name'], r['published_at'], str(r['prerelease']).lower(), sep='\t')
+")
+
+    if ! $found; then
+        echo "No releases found in the last ${days} day(s)."
+    fi
+
+    echo ""
+    echo "Usage: clawhub create <name> --version <VERSION>"
+}
+
+cmd_orphans() {
+    echo "Scanning for unmanaged openclaw containers ..."
+    echo ""
+
+    local found=false
+    while IFS= read -r container; do
+        [[ -z "$container" ]] && continue
+
+        # Derive instance name: strip "openclaw-" prefix
+        local iname="${container#openclaw-}"
+
+        # Skip if this container is managed by current clawhub instance dir
+        [[ -d "$(instance_dir "$iname")" ]] && continue
+
+        found=true
+        local status image created
+        status=$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null)
+        image=$(docker inspect "$container" --format '{{.Config.Image}}' 2>/dev/null)
+        created=$(docker inspect "$container" --format '{{.Created}}' 2>/dev/null | cut -dT -f1,2 | tr T ' ' | cut -d. -f1)
+
+        # Derive instance dir from the mount mapped to /home/node/.openclaw
+        local instance_root
+        instance_root=$(docker inspect "$container" \
+            --format '{{range .Mounts}}{{if eq .Destination "/home/node/.openclaw"}}{{.Source}}{{end}}{{end}}' \
+            2>/dev/null)
+        # .Source is the config dir (…/<name>/config), parent is the instance dir
+        local detected_dir=""
+        if [[ -n "$instance_root" ]]; then
+            detected_dir="$(dirname "$instance_root")"
+        fi
+
+        echo "Container: ${container}  [${status}]"
+        echo "  Image:      ${image}"
+        echo "  Created:    ${created}"
+        [[ -n "$detected_dir" ]] && echo "  Origin dir: ${detected_dir}"
+        echo "  Mounts:"
+        docker inspect "$container" \
+            --format '{{range .Mounts}}    {{.Type}}  {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' 2>/dev/null
+        echo ""
+    done < <(docker ps -a --filter "name=openclaw-" --format '{{.Names}}')
+
+    if ! $found; then
+        echo "No unmanaged openclaw containers found."
     fi
 }
 
@@ -395,13 +475,13 @@ Commands:
   delete <name> [--purge] Stop containers; --purge also removes files
   start  <name>           Start a stopped instance
   stop   <name>           Stop a running instance
-  status [<name>]         Show container status (all or one)
-  list                    List all instances with port/status/version
+  list   [<name>]         List all instances (or docker compose ps for one)
   info   <name>           Show dashboard URL, token, workspace, port, version
   login  <name>           Open a bash shell inside the container
   update <name> [--version <tag>]
                           Pull new image and restart (default: latest)
-  version <name>          Print running container's image version
+  versions [<days>]       List available image versions from last N days (default: 7)
+  orphans                 List unmanaged openclaw containers with their volume mappings
   env                     Show global configuration (CLAWHUB_HOME, instance count)
 EOF
 }
@@ -417,12 +497,12 @@ case "$COMMAND" in
     delete)  cmd_delete  "$@" ;;
     start)   cmd_start   "$@" ;;
     stop)    cmd_stop    "$@" ;;
-    status)  cmd_status  "$@" ;;
     list)    cmd_list    "$@" ;;
     info)    cmd_info    "$@" ;;
     login)   cmd_login   "$@" ;;
     update)  cmd_update  "$@" ;;
-    version) cmd_version "$@" ;;
+    versions) cmd_versions "$@" ;;
+    orphans) cmd_orphans  ;;
     env)     cmd_env     ;;
     help|-h|--help) usage ;;
     *) die "Unknown command: '${COMMAND}'. Run '$(basename "$0") help' for usage." ;;
