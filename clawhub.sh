@@ -63,7 +63,7 @@ services:
     volumes:
       - ./config:/home/node/.openclaw
       - ${WORKSPACE_PATH}:/home/node/.openclaw/workspace
-    command: ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan"]
+    command: ["/bin/sh", "-c", "while true; do node openclaw.mjs gateway --allow-unconfigured --bind lan; sleep 1; done"]
     restart: unless-stopped
     user: "1000:1000"
 
