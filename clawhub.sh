@@ -452,6 +452,24 @@ cmd_orphans() {
     fi
 }
 
+cmd_restart() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: restart <name>"
+    require_instance "$name"
+    compose "$name" restart openclaw-gateway
+    echo "Instance '${name}' restarted."
+}
+
+cmd_refresh() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: refresh <name>"
+    require_instance "$name"
+
+    echo "Regenerating docker-compose.yml for '${name}' ..."
+    write_compose "$(instance_dir "$name")"
+    cmd_restart "$name"
+}
+
 cmd_env() {
     local count=0
     if [[ -d "$INSTANCES_DIR" ]]; then
@@ -481,6 +499,8 @@ Commands:
   login  <name>           Open a bash shell inside the container
   update <name> [--version <tag>]
                           Pull new image and restart (default: latest)
+  restart <name>          Restart a running instance
+  refresh <name>          Regenerate docker-compose.yml and restart
   versions [<days>]       List available image versions from last N days (default: 7)
   orphans                 List unmanaged openclaw containers with their volume mappings
   env                     Show global configuration (CLAWHUB_HOME, instance count)
@@ -502,6 +522,8 @@ case "$COMMAND" in
     info)    cmd_info    "$@" ;;
     login)   cmd_login   "$@" ;;
     update)  cmd_update  "$@" ;;
+    restart) cmd_restart "$@" ;;
+    refresh) cmd_refresh "$@" ;;
     versions) cmd_versions "$@" ;;
     orphans) cmd_orphans  ;;
     env)     cmd_env     ;;
