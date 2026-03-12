@@ -319,7 +319,8 @@ cmd_info() {
 
     echo ""
     echo "--- Dashboard ---"
-    compose "$name" run --rm --no-TTY openclaw-cli openclaw.mjs dashboard --no-open 2>/dev/null || \
+    compose "$name" run --rm --no-TTY openclaw-cli openclaw.mjs dashboard --no-open 2>/dev/null \
+        | sed "s|:${BASE_PORT}|:${PORT}|g" || \
         echo "(Could not retrieve dashboard info — is the instance running?)"
 }
 
