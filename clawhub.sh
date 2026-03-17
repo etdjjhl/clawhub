@@ -65,7 +65,7 @@ services:
       - ${WORKSPACE_PATH}:/home/node/.openclaw/workspace
     command: ["/bin/sh", "-c", "while true; do node openclaw.mjs gateway --allow-unconfigured --bind lan; sleep 1; done"]
     restart: unless-stopped
-    user: "1000:1000"
+    user: "0:0"
 
   openclaw-cli:
     image: ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}
@@ -73,7 +73,7 @@ services:
     volumes:
       - ./config:/home/node/.openclaw
       - ${WORKSPACE_PATH}:/home/node/.openclaw/workspace
-    user: "1000:1000"
+    user: "0:0"
 YAML
 }
 
@@ -157,9 +157,6 @@ cmd_create() {
     echo "Creating instance '${name}' on port ${port} ..."
     mkdir -p "${idir}/config" "${idir}/workspace"
     [[ "$workspace" != "${idir}/workspace" ]] && mkdir -p "$workspace"
-
-    chown -R 1000:1000 "${idir}/config" "$workspace" 2>/dev/null || \
-        echo "WARN: Could not chown directories (may need sudo). Proceeding anyway."
 
     write_compose "$idir"
     write_env "$idir" "$name" "$port" "$workspace" "$version"
@@ -465,9 +462,16 @@ cmd_refresh() {
     [[ -n "$name" ]] || die "Usage: refresh <name>"
     require_instance "$name"
 
+    echo "WARNING: This will recreate the container for '${name}' (the existing container will be removed and replaced)."
+    printf "Proceed? [y/N] "
+    local answer
+    read -r answer
+    [[ "${answer,,}" == "y" ]] || { echo "Aborted."; return 0; }
+
     echo "Regenerating docker-compose.yml for '${name}' ..."
     write_compose "$(instance_dir "$name")"
-    cmd_restart "$name"
+    compose "$name" up -d --force-recreate openclaw-gateway
+    echo "Instance '${name}' recreated."
 }
 
 cmd_env() {
